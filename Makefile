@@ -1,72 +1,108 @@
-PORTNAME=	foreign-cdm
-DISTVERSION=	20251205
-CATEGORIES=	www multimedia linux
-MASTER_SITES=	https://arrowd.name/:cdm
-DISTFILES=	cdm-${CDM_INT_HASH}.tar.gz:cdm
-
-MAINTAINER=	arrowd@FreeBSD.org
-COMMENT=	CDM agent for Chromium
-WWW=		https://github.com/shkhln/foreign-cdm
-
-LICENSE=	MIT
-
-ONLY_FOR_ARCHS=	amd64
-
-BUILD_DEPENDS=	cmake:devel/cmake-core
-
-USES=		linux
-
-USE_GITHUB=	yes
-USE_LDCONFIG=	yes
-USE_LINUX=	base:build,run devtools:build
-
-GH_ACCOUNT=	shkhln
-GH_PROJECT=	foreign-cdm
-GH_TAGNAME=	c45855e456e7b0c6fe1d9f559f54ba3363d1ee39
-GH_TUPLE=	capnproto:capnproto:8b892a8a11a632f5d52b877a49728808a142379a:capnproto/third_party/capnproto
-
-MAKE_ENV=	MAKE_JOBS_NUMBER=${MAKE_JOBS_NUMBER}
-
-SUB_FILES=	fcdm-setup-env
-
-PLIST_FILES=	libexec/fcdm-jail \
-		libexec/fcdm-worker \
-		lib/foreign-cdm/fcdm-fbsd.so \
-		share/chromium/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so \
-		share/chromium/WidevineCdm/manifest.json \
-		share/foreign-cdm/fcdm-setup-env
-
-CDM_INT_HASH=	06395a2863cb1ebdb47617a995b73f95c14fe120
-
-.include <bsd.port.pre.mk>
-
-.if ${LINUX_DEFAULT} == c7
-BUILD_DEPENDS+=	linux-c7-devtoolset>0:devel/linux-c7-devtoolset
-MAKE_ENV+=	LINUX_CC=/compat/linux/opt/rh/devtoolset-11/root/usr/bin/g++
+.if exists(/compat/linux/opt/rh/devtoolset-11/root/usr/bin)
+LINUX_CC_BIN   ?= /compat/linux/opt/rh/devtoolset-11/root/usr/bin
 .else
-MAKE_ENV+=	LINUX_CC=/compat/linux/usr/bin/x86_64-redhat-linux-g++
+LINUX_CC_BIN   ?= /compat/linux/bin
+.endif
+LINUX_CC       ?= $(LINUX_CC_BIN)/gcc
+LINUX_CFLAGS   ?= -Wall -Wextra -Wno-unused-parameter -B$(LINUX_CC_BIN) --sysroot=/compat/linux -O2 -std=c99
+LINUX_CXXFLAGS ?= -Wall -Wextra -Wno-unused-parameter -B$(LINUX_CC_BIN) --sysroot=/compat/linux -O2 -std=c++17
+CFLAGS         += -Wall -Wextra -Wno-unused-parameter
+
+.if defined(DEBUG)
+KJ_DEBUG= -DKJ_DEBUG
+.else
+KJ_DEBUG=
 .endif
 
-post-extract:
-	${MV} ${WRKDIR}/*.h ${WRKSRC}/third_party/cdm/
+MAKE_JOBS_NUMBER ?= 1
 
-post-patch:
-	${REINPLACE_CMD} -e 's|chmod a+srX|chmod a+rX|' ${WRKSRC}/Makefile
+.PHONY: all fcdm lcdm util clean clean-all
 
-do-install:
-	${INSTALL_PROGRAM} ${WRKSRC}/build/fcdm-jail ${STAGEDIR}${PREFIX}/libexec/
-	${CHMOD} u+s ${STAGEDIR}${PREFIX}/libexec/fcdm-jail
-	${INSTALL_PROGRAM} ${WRKSRC}/build/fcdm-worker ${STAGEDIR}${PREFIX}/libexec/
+fcdm: build/fcdm-fbsd.so build/fcdm-worker build/fcdm-jail
+lcdm: build/fcdm-linux.so
+util: build/override-fbsd.so build/override-linux.so
 
-	${MKDIR} ${STAGEDIR}${DATADIR}
-	${INSTALL_DATA} ${WRKDIR}/fcdm-setup-env ${STAGEDIR}${DATADIR}
+all: fcdm lcdm util
 
-	${MKDIR} ${STAGEDIR}${PREFIX}/lib/foreign-cdm
-	${CP} ${WRKSRC}/build/fcdm-fbsd.so ${STAGEDIR}${PREFIX}/lib/foreign-cdm/
-	${STRIP_CMD} ${STAGEDIR}${PREFIX}/lib/foreign-cdm/fcdm-fbsd.so
+build/fcdm-fbsd.so: src/config.h src/lib.cpp src/util.h src/cdm.capnp.h build/capnp-fbsd
+	mkdir -p build
+	$(CXX) $(CXXFLAGS) -std=c++17 $(KJ_DEBUG) -Ithird_party -Ithird_party/capnproto/c++/src -fPIC -shared -o $(.TARGET) \
+ -Wl,--whole-archive \
+ build/capnp-fbsd/c++/src/capnp/libcapnpc.a \
+ build/capnp-fbsd/c++/src/capnp/libcapnp-rpc.a \
+ build/capnp-fbsd/c++/src/capnp/libcapnp.a \
+ build/capnp-fbsd/c++/src/kj/libkj-async.a \
+ build/capnp-fbsd/c++/src/kj/libkj.a \
+ -Wl,--no-whole-archive \
+ src/cdm.capnp.c++ \
+ src/lib.cpp \
+ -pthread
 
-	${MKDIR} ${STAGEDIR}${PREFIX}/share/chromium/WidevineCdm/_platform_specific/linux_x64
-	${LN} -s ${PREFIX}/lib/foreign-cdm/fcdm-fbsd.so ${STAGEDIR}${PREFIX}/share/chromium/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so
-	${LN} -s ${PREFIX}/lib/WidevineCdm/manifest.json ${STAGEDIR}${PREFIX}/share/chromium/WidevineCdm/manifest.json
+build/fcdm-linux.so: src/config.h src/lib.cpp src/util.h src/cdm.capnp.h build/capnp-linux
+	mkdir -p build
+	${LINUX_CC:S|gcc$|g++|} $(LINUX_CXXFLAGS) $(KJ_DEBUG) -Ithird_party -Ithird_party/capnproto/c++/src -fPIC -shared -o $(.TARGET) \
+ -Wl,--whole-archive \
+ build/capnp-linux/c++/src/capnp/libcapnpc.a \
+ build/capnp-linux/c++/src/capnp/libcapnp-rpc.a \
+ build/capnp-linux/c++/src/capnp/libcapnp.a \
+ build/capnp-linux/c++/src/kj/libkj-async.a \
+ build/capnp-linux/c++/src/kj/libkj.a \
+ -Wl,--no-whole-archive \
+ src/cdm.capnp.c++ \
+ src/lib.cpp \
+ -pthread -ldl
 
-.include <bsd.port.post.mk>
+build/fcdm-worker: src/config.h src/worker.cpp src/util.h src/cdm.capnp.h build/capnp-linux
+	mkdir -p build
+	${LINUX_CC:S|gcc$|g++|} $(LINUX_CXXFLAGS) $(KJ_DEBUG) -Ithird_party -Ithird_party/capnproto/c++/src -o $(.TARGET) \
+ -Wl,--whole-archive \
+ build/capnp-linux/c++/src/capnp/libcapnpc.a \
+ build/capnp-linux/c++/src/capnp/libcapnp-rpc.a \
+ build/capnp-linux/c++/src/capnp/libcapnp.a \
+ build/capnp-linux/c++/src/kj/libkj-async.a \
+ build/capnp-linux/c++/src/kj/libkj.a \
+ -Wl,--no-whole-archive \
+ src/cdm.capnp.c++ \
+ src/worker.cpp \
+ -pthread -ldl && chmod a+x $(.TARGET)
+
+build/fcdm-jail: src/config.h src/jail.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -ljail -lutil -o $(.TARGET) src/jail.c && chmod a+srX $(.TARGET)
+
+build/override-fbsd.so: src/override.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -fPIC -shared -o $(.TARGET) src/override.c && chmod a+rX $(.TARGET)
+
+build/override-linux.so: src/override.c
+	mkdir -p build
+	${LINUX_CC:S|g++$|gcc|} $(LINUX_CFLAGS) -fPIC -shared -o $(.TARGET) src/override.c -ldl && chmod a+rX $(.TARGET)
+
+src/cdm.capnp.h: src/cdm.capnp build/capnp-fbsd
+	./build/capnp-fbsd/c++/src/capnp/capnp compile -obuild/capnp-fbsd/c++/src/capnp/capnpc-c++ src/cdm.capnp
+
+build/capnp-fbsd:
+	mkdir -p build/capnp-fbsd
+	env CXXFLAGS="$(CXXFLAGS) -include 'netinet/in.h' -fPIC" cmake -S third_party/capnproto -B $(.TARGET) \
+ -DWITH_ZLIB=OFF -DWITH_OPENSSL=OFF -DWITH_FIBERS=OFF -DBUILD_TESTING=OFF
+	make -C build/capnp-fbsd -j${MAKE_JOBS_NUMBER}
+
+build/capnp-linux:
+	mkdir -p build/capnp-linux
+	env CXX="${LINUX_CC:S|gcc$|g++|}" CXXFLAGS="$(LINUX_CXXFLAGS) -fPIC" cmake -S third_party/capnproto -B $(.TARGET) \
+ -DWITH_ZLIB=OFF -DWITH_OPENSSL=OFF -DWITH_FIBERS=ON -DBUILD_TESTING=OFF
+	make -C build/capnp-linux -j${MAKE_JOBS_NUMBER}
+
+clean:
+	rm -f src/cdm.capnp.h
+	rm -f src/cdm.capnp.c++
+	rm -f build/fcdm-fbsd.so
+	rm -f build/fcdm-linux.so
+	rm -f build/fcdm-worker
+	rm -f build/fcdm-jail
+	rm -f build/override-fbsd.so
+	rm -f build/override-linux.so
+
+clean-all: clean
+	rm -rf build/capnp-fbsd
+	rm -rf build/capnp-linux
